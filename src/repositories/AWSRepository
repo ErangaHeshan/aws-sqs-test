@@ -1,0 +1,186 @@
+import AWS from 'aws-sdk';
+import { get, size, forEach } from 'lodash';
+import { stringify } from '../utils/textParser';
+import { SQS_CONFIGS, MATH_BASE } from '../utils/constants';
+
+AWS.config.update({ region: 'us-east-1' });
+const sqs = new AWS.SQS();
+const AWS_SQS_FAILURE = `AWS SQS failure`;
+
+export const pushRoutes = async routeArray => {
+  const routeChunks = [];
+  while (routeArray.length) {
+    routeChunks.push(
+      routeArray.splice(0, SQS_CONFIGS.MESSAGE_BATCH_MAX_MESSAGE_COUNT)
+    );
+  }
+  const messageBatchPromise = [];
+  forEach(routeChunks, routeChunk => {
+    messageBatchPromise.push(sendMessageBatch(routeChunk, 1));
+  });
+  await Promise.all(messageBatchPromise);
+};
+
+export const sendMessageBatch = async (messageBatch, iteration) => {
+  if (
+    !(messageBatch instanceof Array) ||
+    size(messageBatch) > SQS_CONFIGS.MESSAGE_BATCH_MAX_MESSAGE_COUNT ||
+    !size(messageBatch)
+  ) {
+    console.error(
+      `sendMessageBatch: Invalid parameter messageBatch: ${messageBatch}`
+    );
+    throw new Error(AWS_SQS_FAILURE);
+  }
+  const entries = [];
+  forEach(messageBatch, (message, index) => {
+    entries.push({
+      Id: index.toString(),
+      MessageBody: JSON.stringify(message),
+      // MessageGroupId: 'TestGroup'
+    });
+  });
+  const params = {
+    Entries: entries,
+    QueueUrl: SQS_CONFIGS.QUEUE_URL
+  };
+  const promise = sqs
+    .sendMessageBatch(params)
+    .promise()
+    .then(async (data, error) => {
+      if (error) {
+        console.error(`sendMessageBatch: Error: ${stringify(error)}`);
+        throw new Error(AWS_SQS_FAILURE);
+      } else {
+        // Success response, but could contain failed messages
+        console.info(
+          `sendMessageBatch: Success response {Data: ${stringify(data)}}`
+        );
+        const errorEntries = get(data, 'Failed');
+        if (size(errorEntries) > 0) {
+          const failedMessageBatch = [];
+          forEach(errorEntries, errorEntry => {
+            const failedId = parseInt(get(errorEntry, 'Id'), MATH_BASE);
+            const failedMessageBody = messageBatch[failedId];
+            failedMessageBatch.push(failedMessageBody);
+            console.error(
+              `sendMessageBatch: Failed to send message {Iteration: ${iteration}, Id: ${failedId}, MessageBody: ${stringify(
+                failedMessageBody
+              )}, BatchResultErrorEntry: ${stringify(errorEntry)}`
+            );
+          });
+          if (iteration <= SQS_CONFIGS.MESSAGE_BATCH_MAX_RETRY_COUNT) {
+            await sendMessageBatch(failedMessageBatch, iteration + 1);
+          } else {
+            console.error(
+              `sendMessageBatch: Maximum count of retries exceeded for messageBatch: ${messageBatch}`
+            );
+            throw new Error(AWS_SQS_FAILURE);
+          }
+        } else {
+          console.log(
+            `sendMessageBatch: {Iteration: ${iteration}, Status: Completed, MessageBatch: ${stringify(
+              messageBatch
+            )}}`
+          );
+        }
+      }
+    });
+  return promise;
+};
+
+export const receiveMessageBatch = async () => {
+  const params = {
+    QueueUrl: SQS_CONFIGS.QUEUE_URL,
+    AttributeNames: [],
+    MaxNumberOfMessages: 10
+    // MessageAttributeNames: [
+    //   'STRING_VALUE'
+    //   /* more items */
+    // ],
+    // ReceiveRequestAttemptId: 'STRING_VALUE',
+    // VisibilityTimeout: 0,
+    // WaitTimeSeconds: 0
+  };
+  const promise = await sqs
+    .receiveMessage(params)
+    .promise()
+    .then(resolve => {
+      return resolve;
+    })
+    .catch(error => {
+      console.log('error: ', error);
+      return null;
+    });
+  return promise;
+};
+
+export const deleteMessageBatch = async (receiptHandleBatch, iteration) => {
+  if (
+    !(receiptHandleBatch instanceof Array) ||
+    (size(receiptHandleBatch) > SQS_CONFIGS.MESSAGE_BATCH_MAX_MESSAGE_COUNT ||
+      !size(receiptHandleBatch))
+  ) {
+    console.error(
+      `deleteMessageBatch: Invalid parameter receiptHandleBatch: ${receiptHandleBatch}`
+    );
+    throw new Error(AWS_SQS_FAILURE);
+  }
+  console.info(
+    `deleteMessageBatch: Starting to delete message batch related to receiptHandleBatch: ${receiptHandleBatch}`
+  );
+  const entries = [];
+  forEach(receiptHandleBatch, (receiptHandle, index) => {
+    entries.push({
+      Id: index.toString(),
+      ReceiptHandle: receiptHandle
+    });
+  });
+  const params = {
+    Entries: entries,
+    QueueUrl: SQS_CONFIGS.QUEUE_URL
+  };
+  const promise = sqs
+    .deleteMessageBatch(params)
+    .promise()
+    .then(async (data, error) => {
+      if (error) {
+        console.error(`deleteMessageBatch: Error: ${error.stack}`);
+        throw new Error(AWS_SQS_FAILURE);
+      } else {
+        // Success response, but could contain failed messages
+        console.info(
+          `deleteMessageBatch: Success response {Data: ${stringify(data)}}`
+        );
+        const errorEntries = get(data, 'Failed');
+        if (size(errorEntries) > 0) {
+          const failedReceiptHandleBatch = [];
+          forEach(errorEntries, errorEntry => {
+            const failedId = parseInt(get(errorEntry, 'Id'), MATH_BASE);
+            const failedReceiptHandle = receiptHandleBatch[failedId];
+            failedReceiptHandleBatch.push(failedReceiptHandle);
+            console.error(
+              `deleteMessageBatch: Failed to delete message {Iteration: ${iteration}, Id: ${failedId}, FailedReceiptHandle: ${stringify(
+                failedReceiptHandle
+              )}, BatchResultErrorEntry: ${stringify(errorEntry)}`
+            );
+          });
+          if (iteration <= SQS_CONFIGS.MESSAGE_BATCH_MAX_RETRY_COUNT) {
+            await deleteMessageBatch(failedReceiptHandleBatch, iteration + 1);
+          } else {
+            console.error(
+              `deleteMessageBatch: Maximum count of retries exceeded for receiptHandleBatch: ${receiptHandleBatch}`
+            );
+            throw new Error(AWS_SQS_FAILURE);
+          }
+        } else {
+          console.log(
+            `deleteMessageBatch: {Iteration: ${iteration}, Status: Completed, ReceiptHandleBatch: ${stringify(
+              receiptHandleBatch
+            )}}`
+          );
+        }
+      }
+    });
+  return promise;
+};

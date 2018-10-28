@@ -1,0 +1,12 @@
+version: '2'
+services:
+  cx-msd-route-generate-api:
+    image: sysco/${APP_NAME}:${buildNumber}
+    ports:
+      - '${HOST_PORT}:${APP_PORT}'
+      - '${ADMIN_PORT}:8001'
+    environment:
+      - APP_ENV=${APP_ENV}
+      - APP_PORT=${APP_PORT}
+      - TELOGIS_USERNAME=${TELOGIS_USERNAME}
+      - TELOGIS_PASSWORD=${TELOGIS_PASSWORD}
